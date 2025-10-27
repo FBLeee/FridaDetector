@@ -31,7 +31,7 @@
 
 5.  **内存特征扫描 (Memory Scan)**
     * 扫描 `/proc/self/maps` 中符合特定条件（可读、私有、有文件路径、非 `/dev/`）的内存区域。
-    * 在这些区域中**逐字节搜索**硬编码的 Frida 特征字符串（如 `frida:rpc`, `FridaScriptEngine`, `GLib-GIO`, `GDBusProxy`, `GumScript`），并检查空终止符。
+    * 在这些区域中**逐字节搜索**硬编码的 Frida 特征字符串（如 `frida:rpc`, `FridaScriptEngine`, `GLib-GIO`, `GDBusProxy`, `GumScript`），`但不`检查空终止符。
     * **注意**: 此方法可能因搜索非 Frida 独有字符串（如 `GLib-GIO`）而产生误报，并且由于逐字节扫描性能较低。代码已通过动态构建字符串避免了自检问题。
     * 对应伪代码: `sub_1C20` / `memoryCheck`
 
