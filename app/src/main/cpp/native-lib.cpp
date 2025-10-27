@@ -272,9 +272,10 @@ Java_com_example_fridadetector_FridaChecker_fdCheck(
 }
 
 
+
 /*
  * 5. 内存特征检测 (sub_1C20 -> memoryCheck)
- * [已修正自我检测的缺陷]
+ * [严格模仿汇编的逐字节循环和空终止符检查]，不包含了空终止符检查
  */
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_example_fridadetector_FridaChecker_memoryCheck(
@@ -283,87 +284,225 @@ Java_com_example_fridadetector_FridaChecker_memoryCheck(
     FILE *maps_file = fopen("/proc/self/maps", "r");
     if (!maps_file) {
         __android_log_print(6, "envcheck-native", "checkMemory failed to open maps: %s", strerror(errno));
-        return createCheckResult(env, JNI_TRUE, "PASS: checkMemory failed to open maps");
+        // 汇编在 fopen 失败时返回 0 (NULL) (loc_2244)
+        return NULL;
     }
 
-    // --- 修复开始：动态构建特征字符串 ---
-    // 这样 "frida:rpc" 等字符串就不会作为字面量存在于 .so 文件中
+    // --- 动态构建特征字符串以避免自检 (保持这个修复) ---
     char s_rpc[10];
     s_rpc[0] = 'f'; s_rpc[1] = 'r'; s_rpc[2] = 'i'; s_rpc[3] = 'd'; s_rpc[4] = 'a';
-    s_rpc[5] = ':'; s_rpc[6] = 'r'; s_rpc[7] = 'p'; s_rpc[8] = 'c'; s_rpc[9] = 0;
+    s_rpc[5] = ':'; s_rpc[6] = 'r'; s_rpc[7] = 'p'; s_rpc[8] = 'c'; s_rpc[9] = 0; // 9 字节 + null
 
     char s_engine[18];
     s_engine[0] = 'F'; s_engine[1] = 'r'; s_engine[2] = 'i'; s_engine[3] = 'd'; s_engine[4] = 'a';
     s_engine[5] = 'S'; s_engine[6] = 'c'; s_engine[7] = 'r'; s_engine[8] = 'i'; s_engine[9] = 'p';
     s_engine[10] = 't'; s_engine[11] = 'E'; s_engine[12] = 'n'; s_engine[13] = 'g'; s_engine[14] = 'i';
-    s_engine[15] = 'n'; s_engine[16] = 'e'; s_engine[17] = 0;
+    s_engine[15] = 'n'; s_engine[16] = 'e'; s_engine[17] = 0; // 17 字节 + null
 
     char s_gio[9];
     s_gio[0] = 'G'; s_gio[1] = 'L'; s_gio[2] = 'i'; s_gio[3] = 'b'; s_gio[4] = '-';
-    s_gio[5] = 'G'; s_gio[6] = 'I'; s_gio[7] = 'O'; s_gio[8] = 0;
+    s_gio[5] = 'G'; s_gio[6] = 'I'; s_gio[7] = 'O'; s_gio[8] = 0; // 8 字节 + null
 
     char s_gdbus[11];
     s_gdbus[0] = 'G'; s_gdbus[1] = 'D'; s_gdbus[2] = 'B'; s_gdbus[3] = 'u'; s_gdbus[4] = 's';
     s_gdbus[5] = 'P'; s_gdbus[6] = 'r'; s_gdbus[7] = 'o'; s_gdbus[8] = 'x'; s_gdbus[9] = 'y';
-    s_gdbus[10] = 0;
+    s_gdbus[10] = 0; // 10 字节 + null
 
     char s_gum[10];
     s_gum[0] = 'G'; s_gum[1] = 'u'; s_gum[2] = 'm'; s_gum[3] = 'S'; s_gum[4] = 'c';
-    s_gum[5] = 'r'; s_gum[6] = 'i'; s_gum[7] = 'p'; s_gum[8] = 't'; s_gum[9] = 0;
-    // --- 修复结束 ---
+    s_gum[5] = 'r'; s_gum[6] = 'i'; s_gum[7] = 'p'; s_gum[8] = 't'; s_gum[9] = 0; // 9 字节 + null
+    // --- 动态构建结束 ---
+
 
     char line_buffer[512]; // s
-    unsigned long long start, end;
-    char perms[5];
-    char path[256];
+    unsigned long long start, end; // v29, v28 (X3, X9 in assembly loops)
+    char perms[5]; // v30 (X4 + var_3A8)
+    char path[256]; // s1 (X0 + s1 offset)
 
-    while (fgets(line_buffer, 512, maps_file)) {
+    while (fgets(line_buffer, 512, maps_file)) { // loc_1CC0
         path[0] = '\0';
         perms[0] = '\0';
 
+        // 汇编: "%llx-%llx %4s %*x %*s %*d %[^\n]"
         int sscanf_res = sscanf(line_buffer, "%llx-%llx %4s %*x %*s %*d %255[^\n]", &start, &end, perms, path);
 
-        if (sscanf_res < 3) continue;
-        if (perms[2] == 's') continue;
-        if (perms[0] != 'r') continue;
+        // --- 严格过滤 ---
+        // 汇编: CMP W0, #3; B.EQ loc_1CC0 (如果 sscanf 返回 3，跳回 fgets)
+        // 意味着只有 sscanf 返回 4 或更多 (即 path 被读取) 才继续
+        if (sscanf_res <= 3) continue; // loc_1CF0
 
-        if (sscanf_res == 3) {
-            continue;
+        // 汇编: LDRB W8, [SP,#0x3E0+var_3A5]; CMP W8, #0x73 ('s'); B.EQ loc_1CC0
+        // 检查权限第三位是否为 's' (共享)
+        if (perms[2] == 's') continue; // loc_1CFC
+
+        // 汇编: LDRB W8, [SP,#0x3E0+var_3A8]; CMP W8, #0x72 ('r'); B.NE loc_1CC0
+        // 检查权限第一位是否为 'r' (可读)
+        if (perms[0] != 'r') continue; // loc_1D08
+
+        // 汇编: LDRB W8, [SP,#0x3E0+s1]; CMP W8, #0x2F ('/'); B.NE loc_1CC0
+        // 检查路径是否以 '/' 开头
+        if (path[0] != '/') continue; // loc_1D14 (sscanf_res > 3 保证 path 有内容)
+
+        // 汇编: BL .memcmp; CBZ W0, loc_1CC0 (比较前 5 字节是否为 "/dev/")
+        if (strncmp(path, "/dev/", 5) == 0) continue; // loc_1D28
+        // --- 过滤结束 ---
+
+        // --- 开始逐字节扫描 ---
+        // 指向当前检查的内存地址的指针
+        unsigned char* current_ptr = (unsigned char*)start; // X3, X4 in assembly loops
+
+        // 1. 检查 "frida:rpc" (9 字节 + null 检查)
+        // 汇编: SUB X8, X9, #0xA; CMP X8, X3; B.LS loc_1DD0
+        unsigned char* limit_rpc = (unsigned char*)(end - 10); // X8
+        unsigned char* p_rpc = current_ptr; // X4
+        while (p_rpc <= limit_rpc) { // loc_1D50: CMP X8, X4
+            if (p_rpc[0] == s_rpc[0] && // loc_1D5C: CMP W10, #0x66 ('f')
+                p_rpc[1] == s_rpc[1] && // loc_1D68: CMP W10, #0x72 ('r')
+                p_rpc[2] == s_rpc[2] && // ...
+                p_rpc[3] == s_rpc[3] &&
+                p_rpc[4] == s_rpc[4] &&
+                p_rpc[5] == s_rpc[5] &&
+                p_rpc[6] == s_rpc[6] &&
+                p_rpc[7] == s_rpc[7] &&
+                p_rpc[8] == s_rpc[8]  // loc_1DBC: CMP W10, #0x63 ('c')
+//                &&p_rpc[9] == 0          // loc_1DC8: CBNZ W10, loc_1D4C (检查 null 终止符)
+                    ) {
+                // 找到了！(loc_22AC)
+                __android_log_print(ANDROID_LOG_WARN, "envcheck-native", "found %s in memory at address %llx", s_rpc, (unsigned long long)p_rpc);
+                char log_buffer[512];
+                snprintf(log_buffer, 512, "found %s in memory", s_rpc);
+                fclose(maps_file);
+                return createCheckResult(env, JNI_FALSE, log_buffer); // FAIL
+            }
+            p_rpc++; // loc_1D4C: ADD X4, X4, #1
         }
+        // 未找到 "frida:rpc" (loc_1DD0)
 
-        if (path[0] != '/') continue;
-        if (strncmp(path, "/dev/", 5) == 0) continue;
-
-        size_t len = end - start;
-        void *addr = (void*)start;
-        const char* found_str = NULL;
-
-        // --- 修复：使用动态构建的字符串进行搜索 ---
-        if (memmem(addr, len, s_rpc, 9)) {
-            found_str = s_rpc;
-        } else if (memmem(addr, len, s_engine, 17)) {
-            found_str = s_engine;
-        } else if (memmem(addr, len, s_gio, 8)) {
-            found_str = s_gio;
-        } else if (memmem(addr, len, s_gdbus, 10)) {
-            found_str = s_gdbus;
-        } else if (memmem(addr, len, s_gum, 9)) {
-            found_str = s_gum;
+        // 2. 检查 "FridaScriptEngine" (17 字节 + null 检查)
+        // 汇编: SUB X10, X9, #0x12; CMP X10, X3; B.LS loc_1ED4
+        unsigned char* limit_engine = (unsigned char*)(end - 18); // X10
+        unsigned char* p_engine = current_ptr; // X4
+        while (p_engine <= limit_engine) { // loc_1DF4: CMP X10, X4
+            if (p_engine[0] == s_engine[0] && // loc_1E00: CMP W11, #0x46 ('F')
+                p_engine[1] == s_engine[1] && // loc_1E0C: CMP W11, #0x72 ('r')
+                p_engine[2] == s_engine[2] && // ...
+                p_engine[3] == s_engine[3] &&
+                p_engine[4] == s_engine[4] &&
+                p_engine[5] == s_engine[5] &&
+                p_engine[6] == s_engine[6] &&
+                p_engine[7] == s_engine[7] &&
+                p_engine[8] == s_engine[8] &&
+                p_engine[9] == s_engine[9] &&
+                p_engine[10] == s_engine[10] &&
+                p_engine[11] == s_engine[11] &&
+                p_engine[12] == s_engine[12] &&
+                p_engine[13] == s_engine[13] &&
+                p_engine[14] == s_engine[14] &&
+                p_engine[15] == s_engine[15] &&
+                p_engine[16] == s_engine[16]  // loc_1EC0: CMP W11, #0x65 ('e')
+//                &&p_engine[17] == 0             // loc_1ECC: CBNZ W11, loc_1DF0
+                    ) {
+                // 找到了！(loc_2354)
+                __android_log_print(ANDROID_LOG_WARN, "envcheck-native", "found %s in memory at address %llx", s_engine, (unsigned long long)p_engine);
+                char log_buffer[512];
+                snprintf(log_buffer, 512, "found %s in memory", s_engine);
+                fclose(maps_file);
+                return createCheckResult(env, JNI_FALSE, log_buffer); // FAIL
+            }
+            p_engine++; // loc_1DF0: ADD X4, X4, #1
         }
-        // --- 修复结束 ---
+        // 未找到 "FridaScriptEngine" (loc_1ED4)
 
-        if (found_str) {
-            __android_log_print(5, "envcheck-native", "found %s in memory at address %llx", found_str, start);
-            char log_buffer[512];
-            snprintf(log_buffer, 512, "found %s in memory", found_str);
-            fclose(maps_file);
-            return createCheckResult(env, JNI_FALSE, log_buffer); // FAIL
+        // 3. 检查 "GLib-GIO" (8 字节 + null 检查)
+        // 汇编: SUB X10, X9, #9; CMP X10, X3; B.LS loc_1F8C
+        unsigned char* limit_gio = (unsigned char*)(end - 9); // X10
+        unsigned char* p_gio = current_ptr; // X4
+        while (p_gio <= limit_gio) { // loc_1EF4: CMP X10, X4
+            if (p_gio[0] == s_gio[0] && // loc_1F00: CMP W11, #0x47 ('G')
+                p_gio[1] == s_gio[1] && // loc_1F0C: CMP W11, #0x4C ('L')
+                p_gio[2] == s_gio[2] && // ...
+                p_gio[3] == s_gio[3] &&
+                p_gio[4] == s_gio[4] &&
+                p_gio[5] == s_gio[5] &&
+                p_gio[6] == s_gio[6] &&
+                p_gio[7] == s_gio[7]  // loc_1F54: CMP W11, #0x4F ('O')
+//                &&p_gio[8] == 0         // loc_1F60: CBNZ W11, loc_1EF0
+                    ) {
+                // 找到了！(loc_1F64)
+                __android_log_print(ANDROID_LOG_WARN, "envcheck-native", "found %s in memory at address %llx", s_gio, (unsigned long long)p_gio);
+                char log_buffer[512];
+                // 汇编使用 X4 (p_gio) 作为格式化参数, 我们直接用 s_gio
+                snprintf(log_buffer, 512, "found %s in memory", s_gio); // loc_2120
+                fclose(maps_file);
+                return createCheckResult(env, JNI_FALSE, log_buffer); // FAIL
+            }
+            p_gio++; // loc_1EF0: ADD X4, X4, #1
         }
-    }
+        // 未找到 "GLib-GIO" (loc_1F8C)
+
+        // 4. 检查 "GDBusProxy" (10 字节 + null 检查)
+        // 汇编: SUB X9, X9, #0xB; CMP X9, X3; B.LS loc_2060
+        unsigned char* limit_gdbus = (unsigned char*)(end - 11); // X9
+        unsigned char* p_gdbus = current_ptr; // X4
+        while (p_gdbus <= limit_gdbus) { // loc_1FB0: CMP X9, X4
+            if (p_gdbus[0] == s_gdbus[0] && // loc_1FBC: CMP W10, #0x47 ('G')
+                p_gdbus[1] == s_gdbus[1] && // loc_1FC8: CMP W10, #0x44 ('D')
+                p_gdbus[2] == s_gdbus[2] && // ...
+                p_gdbus[3] == s_gdbus[3] &&
+                p_gdbus[4] == s_gdbus[4] &&
+                p_gdbus[5] == s_gdbus[5] &&
+                p_gdbus[6] == s_gdbus[6] &&
+                p_gdbus[7] == s_gdbus[7] &&
+                p_gdbus[8] == s_gdbus[8] &&
+                p_gdbus[9] == s_gdbus[9]  // loc_2028: CMP W10, #0x79 ('y')
+//                &&p_gdbus[10] == 0           // loc_2034: CBNZ W10, loc_1FAC
+                    ) {
+                // 找到了！(loc_2038)
+                __android_log_print(ANDROID_LOG_WARN, "envcheck-native", "found %s in memory at address %llx", s_gdbus, (unsigned long long)p_gdbus);
+                char log_buffer[512];
+                snprintf(log_buffer, 512, "found %s in memory", s_gdbus); // loc_2120
+                fclose(maps_file);
+                return createCheckResult(env, JNI_FALSE, log_buffer); // FAIL
+            }
+            p_gdbus++; // loc_1FAC: ADD X4, X4, #1
+        }
+        // 未找到 "GDBusProxy" (loc_2060)
+
+        // 5. 检查 "GumScript" (9 字节 + null 检查)
+        // 汇编: CMP X8, X3 (X8 之前是 end - 0xA)
+        unsigned char* limit_gum = (unsigned char*)(end - 10); // X8
+        unsigned char* p_gum = current_ptr; // X3 (汇编这里复用了寄存器, C++ 用新变量)
+        while (p_gum <= limit_gum) { // loc_2080: CMP X8, X3
+            if (p_gum[0] == s_gum[0] && // loc_208C: CMP W9, #0x47 ('G')
+                p_gum[1] == s_gum[1] && // loc_2098: CMP W9, #0x75 ('u')
+                p_gum[2] == s_gum[2] && // ...
+                p_gum[3] == s_gum[3] &&
+                p_gum[4] == s_gum[4] &&
+                p_gum[5] == s_gum[5] &&
+                p_gum[6] == s_gum[6] &&
+                p_gum[7] == s_gum[7] &&
+                p_gum[8] == s_gum[8]  // loc_20EC: CMP W9, #0x74 ('t')
+//                &&p_gum[9] == 0         // loc_20F8: CBNZ W9, loc_207C
+                    ) {
+                // 找到了！(loc_20FC)
+                __android_log_print(ANDROID_LOG_WARN, "envcheck-native", "found %s in memory at address %llx", s_gum, (unsigned long long)p_gum);
+                char log_buffer[512];
+                snprintf(log_buffer, 512, "found %s in memory", s_gum); // loc_2120
+                fclose(maps_file);
+                return createCheckResult(env, JNI_FALSE, log_buffer); // FAIL
+            }
+            p_gum++; // loc_207C: ADD X3, X3, #1
+        }
+        // 未找到 "GumScript" (loc_21B4 -> loc_1CC0)
+        // 如果所有字符串都没找到，继续下一个 maps 行
+
+    } // end while(fgets)
 
     fclose(maps_file);
-    return createCheckResult(env, JNI_TRUE, ""); // PASS
+    // 循环结束, 未找到任何特征 (loc_21C0)
+    return createCheckResult(env, JNI_TRUE, ""); // PASS (返回空字符串)
 }
+
 
 /*
  * 6. Trace 状态检查 (sub_2388 -> traceCheck)
